@@ -53,6 +53,28 @@ app.get("/.well-known/oauth-protected-resource/mcp", (_req, res) => {
   res.json(prm);
 });
 
+// 레거시 발견 경로 — 2025-03-26 이전 사양을 따르는 클라이언트(구버전 Codex·mcp-remote 등)는
+// PRM을 거치지 않고 MCP 서버 오리진에서 곧바로 AS 메타데이터를 찾는다.
+// leeshfield 본체의 /.well-known/oauth-authorization-server와 동일한 내용을 미러링한다.
+// ⚠️ leeshfield 쪽 메타데이터 필드가 바뀌면 여기도 함께 갱신할 것.
+const asMetadata = {
+  issuer: config.leeshfieldUrl,
+  authorization_endpoint: `${config.leeshfieldUrl}/oauth/authorize`,
+  token_endpoint: `${config.leeshfieldUrl}/api/oauth/token`,
+  registration_endpoint: `${config.leeshfieldUrl}/api/oauth/register`,
+  scopes_supported: ["mcp"],
+  response_types_supported: ["code"],
+  grant_types_supported: ["authorization_code", "refresh_token"],
+  token_endpoint_auth_methods_supported: ["none"],
+  code_challenge_methods_supported: ["S256"],
+};
+app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+  res.json(asMetadata);
+});
+app.get("/.well-known/oauth-authorization-server/mcp", (_req, res) => {
+  res.json(asMetadata);
+});
+
 // MCP 엔드포인트 — stateless: 요청마다 새 인스턴스
 app.post("/mcp", requireBearer, async (req, res) => {
   const server = createServer(tokenInfoOf(req));
