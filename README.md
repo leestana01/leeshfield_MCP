@@ -15,12 +15,18 @@ AI 클라이언트가 leeshfield 계정으로 로그인해 자산을 추가하�
 |---|---|
 | `whoami` | 계정·활성 워크스페이스·크레딧 잔액 |
 | `list_models` | 모델 카탈로그 (해상도·화면비·길이·첨부 한도) |
-| `list_assets` | 자산 목록 (kind/q/limit 필터) |
+| `list_assets` | 자산 목록 (kind/q/tag 필터, offset 페이지네이션, total 포함) |
+| `get_asset` | 자산 상세 + **미리보기 이미지** (이미지 축소본·영상 대표 프레임을 직접 보여줌) |
 | `upload_asset` | URL 또는 base64로 자산 업로드 (중복 시 기존 자산 반환) |
+| `update_asset` | 이름·태그·역할 수정 (자산 정리·분류) |
+| `delete_asset` | 휴지통 이동 (웹에서 복구 가능, 프로젝트 참조 시 경고) |
 | `estimate_video` | 생성 전 크레딧 견적·잔액 확인 |
 | `generate_video` | 생성 작업 제출 (자산 참조 attachments, 멱등 키 자동) |
 | `list_jobs` | 최근 작업 50건 상태 |
 | `get_job` | 작업 단건 상태·결과 URL (폴링용) |
+| `cancel_job` | 진행 중 작업 취소 (예약 크레딧 환불) |
+| `retry_job` | 실패·취소 작업 재시도 |
+| `list_projects` | 프로젝트 목록 (작업·자산 연결용) |
 
 ## 클라이언트 연결
 
