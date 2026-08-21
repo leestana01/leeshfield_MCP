@@ -63,3 +63,47 @@ export async function apiPostForm<T>(
   if (!res.ok) throw await parseError(res);
   return (await res.json()) as T;
 }
+
+export async function apiPatch<T>(token: string, path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${config.leeshfieldApiUrl}${path}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await parseError(res);
+  return (await res.json()) as T;
+}
+
+export async function apiDelete<T>(
+  token: string,
+  path: string,
+  params?: Record<string, string>,
+): Promise<T> {
+  const url = new URL(`${config.leeshfieldApiUrl}${path}`);
+  for (const [k, v] of Object.entries(params ?? {})) url.searchParams.set(k, v);
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw await parseError(res);
+  return (await res.json()) as T;
+}
+
+/** 바이너리 응답 (미리보기 이미지 등). 404는 null로 돌려 호출부가 폴백하게 한다 */
+export async function apiGetBytes(
+  token: string,
+  path: string,
+): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  const res = await fetch(`${config.leeshfieldApiUrl}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw await parseError(res);
+  return {
+    buffer: Buffer.from(await res.arrayBuffer()),
+    mimeType: res.headers.get("content-type")?.split(";")[0] ?? "application/octet-stream",
+  };
+}

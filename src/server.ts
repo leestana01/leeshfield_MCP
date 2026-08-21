@@ -5,7 +5,15 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { TokenInfo } from "./auth.js";
-import { LeeshfieldError, apiGet, apiPostForm, apiPostJson } from "./leeshfield.js";
+import {
+  LeeshfieldError,
+  apiDelete,
+  apiGet,
+  apiGetBytes,
+  apiPatch,
+  apiPostForm,
+  apiPostJson,
+} from "./leeshfield.js";
 
 /** 업로드 원본 다운로드 상한 — leeshfield 인그레스 한도(512m)보다 보수적으로 */
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
@@ -18,6 +26,14 @@ function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
 
+type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+function okWith(...content: ToolContent[]) {
+  return { content };
+}
+
 function fail(message: string, extra: Record<string, unknown> = {}) {
   return {
     isError: true,
@@ -27,7 +43,7 @@ function fail(message: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-async function run(handler: () => Promise<ReturnType<typeof ok>>) {
+async function run<T>(handler: () => Promise<T>) {
   try {
     return await handler();
   } catch (err) {
@@ -130,16 +146,118 @@ export function createServer(auth: TokenInfo): McpServer {
     {
       title: "자산 목록 조회",
       description:
-        "워크스페이스의 자산(이미지·영상·오디오) 목록을 조회한다. " +
-        "generate_video의 attachments에 넣을 assetId/handle을 찾을 때 사용한다.",
+        "워크스페이스의 자산(이미지·영상·오디오) 목록을 조회한다. 응답 total로 전체 개수를 " +
+        "알 수 있고 offset으로 페이지를 넘긴다. 자산의 실제 내용(이미지·영상 프레임)을 보려면 " +
+        "get_asset을 호출한다. generate_video의 attachments에 넣을 assetId/handle 탐색에도 사용.",
       inputSchema: {
         kind: z.enum(["image", "video", "audio"]).optional().describe("자산 유형 필터"),
         q: z.string().optional().describe("이름·핸들 부분일치 검색어"),
+        tag: z.string().optional().describe("태그 정확일치 필터"),
         limit: z.number().int().min(1).max(200).optional().describe("최대 개수 (기본 50)"),
+        offset: z.number().int().min(0).optional().describe("건너뛸 개수 (페이지네이션)"),
       },
     },
-    async ({ kind, q, limit }) =>
-      run(async () => ok(await apiGet(token, "/api/assets", { kind, q, limit }))),
+    async ({ kind, q, tag, limit, offset }) =>
+      run(async () => ok(await apiGet(token, "/api/assets", { kind, q, tag, limit, offset }))),
+  );
+
+  server.registerTool(
+    "get_asset",
+    {
+      title: "자산 상세·미리보기",
+      description:
+        "자산 하나의 상세 메타데이터와 함께 실제 내용을 이미지로 반환한다 " +
+        "(이미지는 축소본, 영상은 대표 프레임). 어떤 자산인지 눈으로 확인하고 " +
+        "generate_video 참조 여부를 판단할 때 사용한다. 오디오는 메타데이터만 반환된다.",
+      inputSchema: {
+        asset: z.string().describe("자산 id(ast_...) 또는 handle"),
+        includePreview: z
+          .boolean()
+          .optional()
+          .describe("미리보기 이미지 포함 여부 (기본 true — 메타만 필요하면 false)"),
+      },
+    },
+    async ({ asset, includePreview }) =>
+      run(async () => {
+        const encoded = encodeURIComponent(asset);
+        const detail = await apiGet<{ asset: Record<string, unknown> }>(
+          token,
+          `/api/assets/${encoded}`,
+        );
+        const content: ToolContent[] = [
+          { type: "text", text: JSON.stringify(detail.asset, null, 2) },
+        ];
+        if (includePreview !== false) {
+          const preview = await apiGetBytes(token, `/api/assets/${encoded}/preview`);
+          if (preview) {
+            content.push({
+              type: "image",
+              data: preview.buffer.toString("base64"),
+              mimeType: preview.mimeType,
+            });
+          } else {
+            content.push({
+              type: "text",
+              text: "(이 자산은 시각 미리보기를 지원하지 않습니다 — 오디오이거나 미리보기 생성 불가)",
+            });
+          }
+        }
+        return okWith(...content);
+      }),
+  );
+
+  server.registerTool(
+    "update_asset",
+    {
+      title: "자산 정보 수정",
+      description:
+        "자산의 이름·태그·역할을 수정한다. 여러 자산을 정리·분류할 때 사용한다 " +
+        "(예: 제품 사진에 PRODUCT 역할과 태그 부여).",
+      inputSchema: {
+        asset: z.string().describe("자산 id(ast_...) 또는 handle"),
+        name: z.string().min(1).max(200).optional().describe("새 표시명"),
+        tags: z.array(z.string().min(1).max(40)).max(20).optional().describe("태그 목록 (전체 교체)"),
+        role: z
+          .enum(["CHARACTER", "STYLE", "PRODUCT", "LOCATION", "MOTION", "CAMERA", "AUDIO"])
+          .nullable()
+          .optional()
+          .describe("기본 역할 (null이면 해제)"),
+      },
+    },
+    async ({ asset, name, tags, role }) =>
+      run(async () =>
+        ok(
+          await apiPatch(token, `/api/assets/${encodeURIComponent(asset)}`, {
+            name,
+            tags,
+            role,
+          }),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "delete_asset",
+    {
+      title: "자산 삭제 (휴지통)",
+      description:
+        "자산을 휴지통으로 옮긴다(웹에서 복구 가능). 프로젝트에서 참조 중이면 " +
+        "409와 참조 목록을 반환하며, force=true로 강제할 수 있다.",
+      inputSchema: {
+        asset: z.string().describe("자산 id(ast_...) 또는 handle"),
+        force: z.boolean().optional().describe("프로젝트 참조 경고 무시하고 삭제"),
+      },
+    },
+    async ({ asset, force }) =>
+      run(async () =>
+        ok(
+          await apiDelete(
+            token,
+            `/api/assets/${encodeURIComponent(asset)}`,
+            force ? { force: "true" } : undefined,
+          ),
+        ),
+      ),
   );
 
   server.registerTool(
@@ -329,6 +447,52 @@ export function createServer(auth: TokenInfo): McpServer {
           jobs: res.jobs.map((j) => compactJob(j, false)),
         });
       }),
+  );
+
+  server.registerTool(
+    "cancel_job",
+    {
+      title: "생성 작업 취소",
+      description:
+        "진행 중인 생성 작업을 취소한다. 취소되면 예약 크레딧이 환불된다. " +
+        "공급자 처리 단계에 따라 즉시 취소되지 않고 취소 요청 상태가 될 수 있다.",
+      inputSchema: {
+        jobId: z.string().describe("취소할 작업 id"),
+      },
+    },
+    async ({ jobId }) =>
+      run(async () =>
+        ok(await apiPostJson(token, `/api/jobs/${encodeURIComponent(jobId)}/cancel`, {})),
+      ),
+  );
+
+  server.registerTool(
+    "retry_job",
+    {
+      title: "생성 작업 재시도",
+      description:
+        "실패하거나 취소된 작업을 같은 설정으로 다시 제출한다. 새 jobId가 반환되며 " +
+        "크레딧이 다시 예약된다. 콘텐츠 정책 거절 등 재시도 불가 작업은 거부된다.",
+      inputSchema: {
+        jobId: z.string().describe("재시도할 작업 id"),
+      },
+    },
+    async ({ jobId }) =>
+      run(async () =>
+        ok(await apiPostJson(token, `/api/jobs/${encodeURIComponent(jobId)}/retry`, {})),
+      ),
+  );
+
+  server.registerTool(
+    "list_projects",
+    {
+      title: "프로젝트 목록",
+      description:
+        "워크스페이스의 프로젝트 목록을 조회한다. generate_video의 projectId로 " +
+        "작업을 프로젝트에 연결하거나, 자산의 projectId를 해석할 때 사용한다.",
+      inputSchema: {},
+    },
+    async () => run(async () => ok(await apiGet(token, "/api/projects"))),
   );
 
   server.registerTool(
