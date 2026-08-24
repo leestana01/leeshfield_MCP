@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { TokenInfo } from "./auth.js";
+import { checkPromptFormat, guideModels, readGuide } from "./guides.js";
 import {
   LeeshfieldError,
   apiDelete,
@@ -17,6 +18,13 @@ import {
 
 /** 업로드 원본 다운로드 상한 — leeshfield 인그레스 한도(512m)보다 보수적으로 */
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
+
+/**
+ * model 생략 시 leeshfield가 채우는 기본 모델.
+ * 진짜 기본값은 본체의 defaultDraft()(src/lib/studio/serialize.ts)에 있다 — 여기 값은
+ * 툴 설명 문구와 형식 게이트 판정을 위한 사본이므로, 본체가 바뀌면 함께 고친다.
+ */
+const DEFAULT_MODEL = "seedance-2.0";
 
 /* ─────────────────────────────────────────────────────────
    응답 헬퍼 — 툴 결과는 JSON 텍스트로 통일
@@ -135,10 +143,61 @@ export function createServer(auth: TokenInfo): McpServer {
       title: "생성 모델 카탈로그",
       description:
         "사용 가능한 영상 생성 모델과 각 모델의 지원 해상도·화면비·길이 범위·첨부 한도를 조회한다. " +
-        "generate_video 파라미터를 정하기 전에 호출한다.",
+        "generate_video 파라미터를 정하기 전에 호출한다. " +
+        `프롬프트 형식이 따로 정해진 모델(${guideModels().join(", ")})은 ` +
+        "get_prompt_guide를 먼저 읽어야 제출이 통과된다.",
       inputSchema: {},
     },
     async () => run(async () => ok(await apiGet(token, "/api/models"))),
+  );
+
+  server.registerTool(
+    "get_prompt_guide",
+    {
+      title: "모델별 프롬프트 작성 가이드",
+      description:
+        "특정 모델이 요구하는 프롬프트 형식 가이드 원문을 반환한다. " +
+        `현재 전용 가이드가 있는 모델: ${guideModels().join(", ")}. ` +
+        "이 모델들은 자유 서술이 아니라 고정된 섹션 스키마를 요구하므로, generate_video 호출 전에 " +
+        "반드시 이 툴로 가이드를 먼저 읽고 그 형식대로 프롬프트를 작성해야 한다 " +
+        "(형식이 어긋나면 generate_video가 제출을 거부한다). " +
+        "variant는 참조 자산(attachments) 사용 여부로 고른다.",
+      inputSchema: {
+        model: z.string().describe("모델 id (list_models 참조)"),
+        variant: z
+          .enum(["base", "reference"])
+          .optional()
+          .describe(
+            "base = attachments 없이 텍스트만 (기본). reference = attachments로 참조 자산을 넣는 경우",
+          ),
+      },
+    },
+    async ({ model, variant }) =>
+      run(async () => {
+        const resolved = readGuide(model, variant ?? "base");
+        if (!resolved) {
+          return fail(
+            `'${model}'에는 전용 프롬프트 가이드가 없습니다. 일반적인 자연어 프롬프트로 작성하세요.`,
+            { modelsWithGuide: guideModels() },
+          );
+        }
+        return okWith(
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                model: resolved.model,
+                variant: resolved.variant,
+                whenToUse: resolved.whenToUse,
+                requiredSections: resolved.requiredSections,
+              },
+              null,
+              2,
+            ),
+          },
+          { type: "text", text: resolved.text },
+        );
+      }),
   );
 
   server.registerTool(
@@ -344,7 +403,7 @@ export function createServer(auth: TokenInfo): McpServer {
         "영상 생성 전 예상 차감 크레딧과 잔액 충분 여부를 조회한다. " +
         "generate_video와 같은 파라미터로 호출해 비용을 먼저 확인한다.",
       inputSchema: {
-        model: z.string().optional().describe("모델 id (기본 seedance-2.0)"),
+        model: z.string().optional().describe(`모델 id (기본 ${DEFAULT_MODEL})`),
         resolution: z.string().optional().describe("해상도 (기본 720p)"),
         aspectRatio: z.string().optional().describe("화면비 (기본 16:9)"),
         durationSec: z.number().optional().describe("길이 초 (기본 5)"),
@@ -395,7 +454,9 @@ export function createServer(auth: TokenInfo): McpServer {
       description:
         "영상 생성 작업을 제출한다. 완료까지 수 분 걸리는 비동기 작업이며, 반환된 jobId로 " +
         "get_job을 폴링해 상태·결과를 확인한다. 자산을 참조하려면 attachments에 " +
-        "assetId 또는 handle을 넣는다. 제출 전 estimate_video로 비용 확인을 권장한다.",
+        "assetId 또는 handle을 넣는다. 제출 전 estimate_video로 비용 확인을 권장한다. " +
+        `⚠️ ${guideModels().join(", ")} 모델은 프롬프트 형식이 고정돼 있다 — 먼저 ` +
+        "get_prompt_guide를 호출해 가이드대로 작성해야 하며, 형식을 벗어나면 제출이 거부된다.",
       inputSchema: {
         prompt: z.string().min(1).max(4000).describe("생성 프롬프트"),
         mode: z
@@ -403,7 +464,7 @@ export function createServer(auth: TokenInfo): McpServer {
           .optional()
           .describe("생성 모드 — 생략 시 첨부 유무로 추론 (t2v/mixed)"),
         negativePrompt: z.string().max(2000).optional().describe("부정 프롬프트"),
-        model: z.string().optional().describe("모델 id (list_models 참조, 기본 seedance-2.0)"),
+        model: z.string().optional().describe(`모델 id (list_models 참조, 기본 ${DEFAULT_MODEL})`),
         durationSec: z.number().optional().describe("길이 초 (기본 5)"),
         aspectRatio: z.string().optional().describe("화면비 (기본 16:9)"),
         resolution: z.string().optional().describe("해상도 (기본 720p)"),
@@ -419,6 +480,23 @@ export function createServer(auth: TokenInfo): McpServer {
     },
     async (input) =>
       run(async () => {
+        // 형식이 고정된 모델은 제출 전에 막는다. 크레딧은 제출 시점에 예약되므로
+        // 공급자까지 보내고 실패하면 그대로 낭비다.
+        const model = input.model ?? DEFAULT_MODEL;
+        const check = checkPromptFormat(model, input.prompt, !!input.attachments?.length);
+        if (check && !check.ok) {
+          return fail(`${model} 프롬프트가 이 모델의 필수 형식을 따르지 않아 제출하지 않았습니다.`, {
+            model,
+            guideVariant: check.variant,
+            requiredSections: check.requiredSections,
+            missingSections: check.missingSections,
+            missingShotMarker: check.missingShotMarker,
+            nextStep:
+              `get_prompt_guide({ model: "${model}", variant: "${check.variant}" })로 ` +
+              "가이드를 읽고 프롬프트를 다시 작성한 뒤 재제출하세요. 크레딧은 차감되지 않았습니다.",
+          });
+        }
+
         const res = await apiPostJson<{ jobId: string; reused: boolean }>(token, "/api/jobs", {
           ...input,
           idempotencyKey: input.idempotencyKey ?? randomUUID(),

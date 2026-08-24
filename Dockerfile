@@ -18,6 +18,8 @@ RUN addgroup -S app && adduser -S app -G app
 COPY --from=builder --chown=app:app /app/node_modules ./node_modules
 COPY --from=builder --chown=app:app /app/dist ./dist
 COPY --from=builder --chown=app:app /app/package.json ./package.json
+# 프롬프트 가이드 원문 — 런타임에 읽는다(src/guides.ts). 빠지면 get_prompt_guide가 죽는다.
+COPY --from=builder --chown=app:app /app/docs ./docs
 USER app
 EXPOSE 3000
 CMD ["node", "dist/index.js"]
