@@ -15,6 +15,7 @@ AI 클라이언트가 leeshfield 계정으로 로그인해 자산을 추가하�
 |---|---|
 | `whoami` | 계정·활성 워크스페이스·크레딧 잔액 |
 | `list_models` | 모델 카탈로그 (해상도·화면비·길이·첨부 한도) |
+| `get_prompt_guide` | 모델별 프롬프트 형식 가이드 원문 (현재 `minimax-h3`) |
 | `list_assets` | 자산 목록 (kind/q/tag 필터, offset 페이지네이션, total 포함) |
 | `get_asset` | 자산 상세 + **미리보기 이미지** (이미지 축소본·영상 대표 프레임을 직접 보여줌) |
 | `upload_asset` | URL 또는 base64로 자산 업로드 (중복 시 기존 자산 반환) |
@@ -27,6 +28,19 @@ AI 클라이언트가 leeshfield 계정으로 로그인해 자산을 추가하�
 | `cancel_job` | 진행 중 작업 취소 (예약 크레딧 환불) |
 | `retry_job` | 실패·취소 작업 재시도 |
 | `list_projects` | 프로젝트 목록 (작업·자산 연결용) |
+
+### 프롬프트 형식이 고정된 모델
+
+`minimax-h3`는 자유 서술 프롬프트를 받지 않는다. 섹션 헤더가 붙은 고정 스키마를 요구한다.
+
+| 상황 | variant | 필수 섹션 |
+|---|---|---|
+| 첨부 없음 (T2VA) | `base` | `integrated_multimodal_description`, `overall_soundscape`, `non_diegetic_music` |
+| 첨부 있음 (full-reference) | `reference` | 위 3개 + `subject_definitions`, `summary`, `retention_analysis`, `detailed_description` |
+
+`get_prompt_guide`로 가이드 원문(+ leeshfield 적용 제약)을 받아 그대로 작성하면 된다.
+형식을 벗어난 프롬프트는 `generate_video`가 **공급자에 보내기 전에 거부**하므로 크레딧이
+낭비되지 않는다. 원문은 [`docs/minimax_h3/`](docs/minimax_h3)에 있다.
 
 ## 클라이언트 연결
 
