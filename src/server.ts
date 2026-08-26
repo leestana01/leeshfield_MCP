@@ -1,4 +1,4 @@
-// MCP 서버 구성 — leeshfield 영상 생성 플랫폼 툴 8종.
+// MCP 서버 구성 — leeshfield 영상 생성 플랫폼 툴 15종.
 // 각 요청마다 새 인스턴스를 만든다(stateless Streamable HTTP).
 
 import { randomUUID } from "node:crypto";
@@ -6,6 +6,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { TokenInfo } from "./auth.js";
 import { checkPromptFormat, guideModels, readGuide } from "./guides.js";
+import {
+  DEFAULT_MODEL,
+  DEFAULT_RESOLUTION,
+  MODEL_POLICY,
+  type ModelWire,
+  sortDefaultFirst,
+  withModelDefaults,
+} from "./model-defaults.js";
 import {
   LeeshfieldError,
   apiDelete,
@@ -18,13 +26,6 @@ import {
 
 /** 업로드 원본 다운로드 상한 — leeshfield 인그레스 한도(512m)보다 보수적으로 */
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
-
-/**
- * model 생략 시 leeshfield가 채우는 기본 모델.
- * 진짜 기본값은 본체의 defaultDraft()(src/lib/studio/serialize.ts)에 있다 — 여기 값은
- * 툴 설명 문구와 형식 게이트 판정을 위한 사본이므로, 본체가 바뀌면 함께 고친다.
- */
-const DEFAULT_MODEL = "seedance-2.0";
 
 /* ─────────────────────────────────────────────────────────
    응답 헬퍼 — 툴 결과는 JSON 텍스트로 통일
@@ -108,7 +109,16 @@ function compactJob(job: JobViewWire, includeRequest = true) {
    ───────────────────────────────────────────────────────── */
 
 export function createServer(auth: TokenInfo): McpServer {
-  const server = new McpServer({ name: "leeshfield", version: "0.1.0" });
+  // instructions는 클라이언트가 초기화 때 한 번 받아 컨텍스트에 싣는다 —
+  // 툴 설명보다 먼저 읽히므로 "고르기 전에 물어라"를 여기에 둔다.
+  const server = new McpServer(
+    { name: "leeshfield", version: "0.1.0" },
+    {
+      instructions:
+        "leeshfield는 크레딧이 실제로 차감되는 영상 생성 플랫폼이다. " +
+        `모델 선택 정책: ${MODEL_POLICY}`,
+    },
+  );
   const token = auth.token;
 
   server.registerTool(
@@ -145,10 +155,24 @@ export function createServer(auth: TokenInfo): McpServer {
         "사용 가능한 영상 생성 모델과 각 모델의 지원 해상도·화면비·길이 범위·첨부 한도를 조회한다. " +
         "generate_video 파라미터를 정하기 전에 호출한다. " +
         `프롬프트 형식이 따로 정해진 모델(${guideModels().join(", ")})은 ` +
-        "get_prompt_guide를 먼저 읽어야 제출이 통과된다.",
+        "get_prompt_guide를 먼저 읽어야 제출이 통과된다. " +
+        "⚠️ 이 목록은 선택지일 뿐 추천 순위가 아니다 — " +
+        MODEL_POLICY,
       inputSchema: {},
     },
-    async () => run(async () => ok(await apiGet(token, "/api/models"))),
+    async () =>
+      run(async () => {
+        const res = await apiGet<{ models: ModelWire[] }>(token, "/api/models");
+        return ok({
+          models: sortDefaultFirst(res.models).map((m) => ({
+            ...m,
+            ...(m.id === DEFAULT_MODEL
+              ? { isDefault: true, defaultResolution: DEFAULT_RESOLUTION }
+              : {}),
+          })),
+          modelSelectionPolicy: MODEL_POLICY,
+        });
+      }),
   );
 
   server.registerTool(
@@ -404,7 +428,10 @@ export function createServer(auth: TokenInfo): McpServer {
         "generate_video와 같은 파라미터로 호출해 비용을 먼저 확인한다.",
       inputSchema: {
         model: z.string().optional().describe(`모델 id (기본 ${DEFAULT_MODEL})`),
-        resolution: z.string().optional().describe("해상도 (기본 720p)"),
+        resolution: z
+          .string()
+          .optional()
+          .describe(`해상도 (기본 모델은 ${DEFAULT_RESOLUTION}, 그 외 모델은 720p)`),
         aspectRatio: z.string().optional().describe("화면비 (기본 16:9)"),
         durationSec: z.number().optional().describe("길이 초 (기본 5)"),
         outputCount: z.number().int().optional().describe("출력 개수 (기본 1)"),
@@ -419,8 +446,7 @@ export function createServer(auth: TokenInfo): McpServer {
       run(async () =>
         ok(
           await apiGet(token, "/api/estimate", {
-            model,
-            resolution,
+            ...withModelDefaults({ model, resolution }),
             aspectRatio,
             durationSec,
             outputCount,
@@ -456,7 +482,9 @@ export function createServer(auth: TokenInfo): McpServer {
         "get_job을 폴링해 상태·결과를 확인한다. 자산을 참조하려면 attachments에 " +
         "assetId 또는 handle을 넣는다. 제출 전 estimate_video로 비용 확인을 권장한다. " +
         `⚠️ ${guideModels().join(", ")} 모델은 프롬프트 형식이 고정돼 있다 — 먼저 ` +
-        "get_prompt_guide를 호출해 가이드대로 작성해야 하며, 형식을 벗어나면 제출이 거부된다.",
+        "get_prompt_guide를 호출해 가이드대로 작성해야 하며, 형식을 벗어나면 제출이 거부된다. " +
+        `기본 모델이 ${DEFAULT_MODEL}이므로 model을 생략해도 이 형식 검사를 받는다. ` +
+        `⚠️ 모델 선택 정책: ${MODEL_POLICY}`,
       inputSchema: {
         prompt: z.string().min(1).max(4000).describe("생성 프롬프트"),
         mode: z
@@ -465,9 +493,22 @@ export function createServer(auth: TokenInfo): McpServer {
           .describe("생성 모드 — 생략 시 첨부 유무로 추론 (t2v/mixed)"),
         negativePrompt: z.string().max(2000).optional().describe("부정 프롬프트"),
         model: z.string().optional().describe(`모델 id (list_models 참조, 기본 ${DEFAULT_MODEL})`),
+        modelConfirmedByUser: z
+          .boolean()
+          .optional()
+          .describe(
+            "사용자가 이번 생성에 쓸 모델을 직접 지정했거나, 제안한 모델을 확인해 줬을 때만 true. " +
+              "추측으로 채우지 말 것 — 크레딧이 실제로 나가는 선택이고, 사용자는 이 값을 툴 호출에서 그대로 본다. " +
+              "생략하거나 false면 제출하지 않고 확인 요청을 돌려준다. " +
+              `사용자가 "아무거나/기본으로"라고 답한 경우엔 model을 생략하고 true만 넣으면 ` +
+              `기본값(${DEFAULT_MODEL} ${DEFAULT_RESOLUTION})으로 제출된다.`,
+          ),
         durationSec: z.number().optional().describe("길이 초 (기본 5)"),
         aspectRatio: z.string().optional().describe("화면비 (기본 16:9)"),
-        resolution: z.string().optional().describe("해상도 (기본 720p)"),
+        resolution: z
+          .string()
+          .optional()
+          .describe(`해상도 (기본 모델은 ${DEFAULT_RESOLUTION}, 그 외 모델은 720p)`),
         audioEnabled: z.boolean().optional().describe("오디오 생성 여부"),
         outputCount: z.number().int().min(1).max(4).optional().describe("출력 개수"),
         seed: z.number().int().optional().describe("재현용 시드"),
@@ -480,9 +521,35 @@ export function createServer(auth: TokenInfo): McpServer {
     },
     async (input) =>
       run(async () => {
+        const { modelConfirmedByUser, ...submit } = input;
+
+        // 모델 확인 게이트 — 모델은 단가가 몇 배씩 다른 지출 선택이다. 클라이언트가
+        // 사용자에게 묻지 않고 고르는 것을 막기 위해, 확인 플래그 없이는 제출하지 않는다.
+        if (!modelConfirmedByUser) {
+          const catalog = await apiGet<{ models: ModelWire[] }>(token, "/api/models");
+          return fail("어떤 모델로 생성할지 사용자 확인이 필요합니다. 아직 제출하지 않았습니다.", {
+            requiresUserConfirmation: true,
+            policy: MODEL_POLICY,
+            defaultModel: DEFAULT_MODEL,
+            defaultResolution: DEFAULT_RESOLUTION,
+            availableModels: sortDefaultFirst(catalog.models).map((m) => ({
+              id: m.id,
+              label: m.label,
+              resolutions: m.resolutions,
+              isDefault: m.id === DEFAULT_MODEL,
+            })),
+            nextStep:
+              "사용자에게 위 모델 중 무엇으로 만들지 물어보고, 답을 받은 뒤 " +
+              "model(필요하면 resolution)과 modelConfirmedByUser: true를 넣어 다시 호출하세요. " +
+              `사용자가 "기본으로"라고 하면 model을 생략해도 됩니다(${DEFAULT_MODEL} ${DEFAULT_RESOLUTION}). ` +
+              "크레딧은 차감되지 않았습니다.",
+          });
+        }
+
         // 형식이 고정된 모델은 제출 전에 막는다. 크레딧은 제출 시점에 예약되므로
         // 공급자까지 보내고 실패하면 그대로 낭비다.
-        const model = input.model ?? DEFAULT_MODEL;
+        const defaults = withModelDefaults(submit);
+        const model = defaults.model;
         const check = checkPromptFormat(model, input.prompt, !!input.attachments?.length);
         if (check && !check.ok) {
           return fail(`${model} 프롬프트가 이 모델의 필수 형식을 따르지 않아 제출하지 않았습니다.`, {
@@ -498,8 +565,9 @@ export function createServer(auth: TokenInfo): McpServer {
         }
 
         const res = await apiPostJson<{ jobId: string; reused: boolean }>(token, "/api/jobs", {
-          ...input,
-          idempotencyKey: input.idempotencyKey ?? randomUUID(),
+          ...submit,
+          ...defaults,
+          idempotencyKey: submit.idempotencyKey ?? randomUUID(),
         });
         return ok({
           ...res,
