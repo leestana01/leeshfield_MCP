@@ -466,7 +466,13 @@ export function createServer(auth: TokenInfo): McpServer {
       .optional()
       .describe("첨부 역할"),
     weight: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe("이미지 중요도"),
-    trim: z.tuple([z.number(), z.number()]).optional().describe("[시작초, 끝초] 트림 구간"),
+    // z.tuple()은 Draft-07의 `items: [...]`로 직렬화되어 Codex가 툴 전체를 제외한다.
+    // 같은 검증 의미를 유지하면서 OpenAI 함수 툴 호환 `items: { type: number }`를 만든다.
+    trim: z
+      .array(z.number())
+      .length(2)
+      .optional()
+      .describe("[시작초, 끝초] 트림 구간"),
     purpose: z
       .enum(["motion", "camera", "rhythm", "composition"])
       .optional()
