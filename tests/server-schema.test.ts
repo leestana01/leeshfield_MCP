@@ -52,13 +52,34 @@ describe("MCP tool schemas", () => {
   it("Codex가 모든 툴을 등록할 수 있는 items 스키마만 노출한다", async () => {
     const tools = await listTools();
 
-    expect(tools).toHaveLength(15);
+    expect(tools).toHaveLength(17);
     expect(tools.map((tool) => tool.name)).toContain("generate_video");
     expect(
       tools.flatMap((tool) =>
         pathsWithArrayItems(tool.inputSchema, `tools.${tool.name}.inputSchema`),
       ),
     ).toEqual([]);
+  });
+
+  it("presigned 업로드 2단계 툴을 노출하고, 로컬 파일은 base64가 아니라 이 경로로 유도한다", async () => {
+    const tools = await listTools();
+    const names = tools.map((tool) => tool.name);
+    expect(names).toContain("create_upload_url");
+    expect(names).toContain("complete_upload");
+
+    // 1단계: 서명 발급에 필요한 필드가 required인지 (sizeBytes 누락 시 서명 못 함)
+    const createUrl = tools.find((tool) => tool.name === "create_upload_url");
+    expect(createUrl?.inputSchema.required).toEqual(
+      expect.arrayContaining(["name", "mimeType", "sizeBytes"]),
+    );
+
+    // 2단계: objectKey만 필수 — 나머지는 서버가 객체에서 판정한다
+    const complete = tools.find((tool) => tool.name === "complete_upload");
+    expect(complete?.inputSchema.required).toEqual(["objectKey"]);
+
+    // upload_asset 설명이 로컬 파일을 presigned 경로로 돌려보내는지
+    const uploadAsset = tools.find((tool) => tool.name === "upload_asset");
+    expect(uploadAsset?.description).toContain("create_upload_url");
   });
 
   it("Claude를 포함한 표준 MCP 클라이언트에서 trim의 기존 2개 숫자 계약을 유지한다", async () => {

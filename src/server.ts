@@ -1,4 +1,4 @@
-// MCP 서버 구성 — leeshfield 영상 생성 플랫폼 툴 15종.
+// MCP 서버 구성 — leeshfield 영상 생성 플랫폼 툴 17종.
 // 각 요청마다 새 인스턴스를 만든다(stateless Streamable HTTP).
 
 import { randomUUID } from "node:crypto";
@@ -346,11 +346,16 @@ export function createServer(auth: TokenInfo): McpServer {
   server.registerTool(
     "upload_asset",
     {
-      title: "자산 업로드",
+      title: "자산 업로드 (URL·base64)",
       description:
         "URL 또는 base64 데이터로 자산(이미지·영상·오디오)을 워크스페이스에 업로드한다. " +
         "업로드된 자산은 generate_video의 참조(attachments)로 사용할 수 있다. " +
-        "동일 파일이 이미 있으면 기존 자산 정보를 반환한다.",
+        "동일 파일이 이미 있으면 기존 자산 정보를 반환한다.\n\n" +
+        "⚠️ 로컬 파일에는 이 툴을 쓰지 말 것. base64는 파일 크기의 약 1.33배를 대화 " +
+        "컨텍스트로 그대로 흘려보내므로 수백 KB만 넘어도 실용성이 없다. 로컬 파일은 " +
+        "create_upload_url → 셸에서 curl PUT → complete_upload 순서를 쓴다.\n\n" +
+        "이 툴이 맞는 경우: 원격 URL에서 가져올 때(url), 또는 셸을 쓸 수 없는 환경에서 " +
+        "아주 작은 파일을 올릴 때(base64).",
       inputSchema: {
         url: z.string().url().optional().describe("다운로드할 원본 URL (url/base64 중 하나 필수)"),
         base64: z.string().optional().describe("base64 인코딩된 파일 데이터"),
@@ -405,6 +410,102 @@ export function createServer(auth: TokenInfo): McpServer {
           return ok({ uploaded: true, ...uploaded });
         } catch (err) {
           // 중복 파일 — 기존 자산을 그대로 쓰면 된다
+          if (err instanceof LeeshfieldError && err.status === 409 && err.body.duplicate) {
+            return ok({
+              uploaded: false,
+              duplicate: true,
+              assetId: err.body.existingId,
+              name: err.body.existingName,
+              message: "동일한 파일이 이미 있어 기존 자산을 반환합니다.",
+            });
+          }
+          throw err;
+        }
+      }),
+  );
+
+  server.registerTool(
+    "create_upload_url",
+    {
+      title: "업로드 서명 URL 발급",
+      description:
+        "로컬 파일을 올릴 때 쓰는 1단계. 파일을 저장소로 직접 PUT할 수 있는 서명 URL을 발급한다. " +
+        "파일 내용을 읽어 이 대화에 싣지 말 것 — base64로 인코딩하면 파일 크기의 약 1.33배가 " +
+        "컨텍스트를 통째로 소모한다. 반환된 uploadUrl로 셸에서 직접 PUT하면 바이트가 " +
+        "대화를 거치지 않는다.\n\n" +
+        "순서: (1) 이 툴로 URL 발급 → (2) 셸에서 " +
+        '`curl -sS -X PUT -H "Content-Type: <mimeType>" --data-binary @<파일경로> "<uploadUrl>"` ' +
+        "실행 → (3) complete_upload에 objectKey를 넘겨 자산으로 등록.\n\n" +
+        "sizeBytes는 실제 파일 크기여야 한다(`wc -c < 파일`). 서명은 10분 뒤 만료된다. " +
+        "PUT의 Content-Type은 발급 시 값과 같게 보낼 것 — 서버가 완료 단계에서 파일 내용과 " +
+        "대조하므로 실제 형식과 다르면 등록이 거부된다.",
+      inputSchema: {
+        name: z.string().min(1).max(200).describe("파일명 (확장자 포함)"),
+        mimeType: z
+          .string()
+          .min(1)
+          .describe("MIME 타입 — image/png, image/jpeg, image/webp, video/mp4, video/quicktime, video/webm, audio/mpeg, audio/wav, audio/mp4 등"),
+        sizeBytes: z.number().int().positive().describe("실제 파일 크기(바이트)"),
+        kind: z
+          .enum(["image", "video", "audio"])
+          .optional()
+          .describe("자산 유형 — 생략 시 MIME 타입에서 추론"),
+      },
+    },
+    async ({ name, mimeType, sizeBytes, kind }) =>
+      run(async () => {
+        const issued = await apiPostJson<{
+          uploadUrl: string;
+          objectKey: string;
+          kind: string;
+          mimeType: string;
+          expiresInSec: number;
+          maxBytes: number;
+        }>(token, "/api/assets/upload-url", { name, mimeType, sizeBytes, kind });
+        return ok({
+          ...issued,
+          nextStep:
+            `셸에서 실행: curl -sS -X PUT -H "Content-Type: ${issued.mimeType}" ` +
+            `--data-binary @<파일경로> "<uploadUrl>"  ` +
+            `— 성공하면 complete_upload({ objectKey: "${issued.objectKey}", name: "${name}" })`,
+        });
+      }),
+  );
+
+  server.registerTool(
+    "complete_upload",
+    {
+      title: "업로드 완료·자산 등록",
+      description:
+        "create_upload_url로 받은 서명 URL에 PUT을 끝낸 뒤 호출하는 2단계. 업로드된 객체를 " +
+        "검증하고 워크스페이스 자산으로 등록한다. 반환된 자산은 generate_video의 " +
+        "참조(attachments)로 쓸 수 있다.\n\n" +
+        "서버가 업로드된 바이트에서 해시·해상도·길이를 직접 계산해 정책을 검증한다. " +
+        "동일 파일이 이미 있으면 기존 자산을 반환한다. 검증에 실패하면 스테이징 객체는 " +
+        "폐기되므로 파일을 고쳐 1단계부터 다시 하면 된다.",
+      inputSchema: {
+        objectKey: z.string().min(1).describe("create_upload_url이 반환한 objectKey"),
+        name: z.string().min(1).max(200).optional().describe("자산 표시명 — 생략 시 업로드한 파일명"),
+        kind: z
+          .enum(["image", "video", "audio"])
+          .optional()
+          .describe("자산 유형 — 생략 시 업로드된 객체의 MIME에서 추론"),
+        allowDuplicate: z
+          .boolean()
+          .optional()
+          .describe("true면 동일 파일이 있어도 새 자산으로 등록"),
+      },
+    },
+    async ({ objectKey, name, kind, allowDuplicate }) =>
+      run(async () => {
+        try {
+          const registered = await apiPostJson<{ assetId: string; handle: string }>(
+            token,
+            "/api/assets/upload-complete",
+            { objectKey, name, kind, allowDuplicate },
+          );
+          return ok({ uploaded: true, ...registered });
+        } catch (err) {
           if (err instanceof LeeshfieldError && err.status === 409 && err.body.duplicate) {
             return ok({
               uploaded: false,
