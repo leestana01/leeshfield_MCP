@@ -18,7 +18,9 @@ AI 클라이언트가 leeshfield 계정으로 로그인해 자산을 추가하�
 | `get_prompt_guide` | 모델별 프롬프트 형식 가이드 원문 (현재 `minimax-h3`) |
 | `list_assets` | 자산 목록 (kind/q/tag 필터, offset 페이지네이션, total 포함) |
 | `get_asset` | 자산 상세 + **미리보기 이미지** (이미지 축소본·영상 대표 프레임을 직접 보여줌) |
-| `upload_asset` | URL 또는 base64로 자산 업로드 (중복 시 기존 자산 반환) |
+| `create_upload_url` | **로컬 파일 업로드 1단계** — 저장소 직행 서명 URL 발급 |
+| `complete_upload` | **로컬 파일 업로드 2단계** — 업로드된 객체 검증 후 자산 등록 |
+| `upload_asset` | 원격 URL 또는 base64로 자산 업로드 (중복 시 기존 자산 반환) |
 | `update_asset` | 이름·태그·역할 수정 (자산 정리·분류) |
 | `delete_asset` | 휴지통 이동 (웹에서 복구 가능, 프로젝트 참조 시 경고) |
 | `estimate_video` | 생성 전 크레딧 견적·잔액 확인 |
@@ -28,6 +30,27 @@ AI 클라이언트가 leeshfield 계정으로 로그인해 자산을 추가하�
 | `cancel_job` | 진행 중 작업 취소 (예약 크레딧 환불) |
 | `retry_job` | 실패·취소 작업 재시도 |
 | `list_projects` | 프로젝트 목록 (작업·자산 연결용) |
+
+### 로컬 파일 업로드
+
+MCP 도구 인자는 JSON이라 파일 바이트를 실으려면 base64여야 하고, 그 문자열은 모델
+컨텍스트를 그대로 지나간다(원본의 약 1.33배). 그래서 로컬 파일은 `upload_asset`이 아니라
+서명 URL 2단계를 쓴다 — 바이트가 모델도 MCP 서버도 거치지 않고 저장소로 직행한다.
+
+```
+1. create_upload_url({ name, mimeType, sizeBytes })   → uploadUrl, objectKey
+2. curl -sS -X PUT -H "Content-Type: <mimeType>" \
+        --data-binary @<파일경로> "<uploadUrl>"        ← 셸에서 실행
+3. complete_upload({ objectKey, name })               → assetId, handle
+```
+
+서버는 2단계로 올라온 바이트에서 sha256·형식(매직넘버)·해상도·길이를 **직접 계산해**
+정책을 검증한다. 선언한 Content-Type이 실제 내용과 다르면 등록이 거부된다.
+2단계까지만 하고 3단계를 부르지 않은 업로드는 temp/에 남으며 정리 대상이다
+(leeshfield `docs/storage-retention.md` 참고).
+
+`upload_asset`은 원격 URL에서 가져올 때, 또는 셸이 없는 환경에서 아주 작은 파일을
+올릴 때만 쓴다.
 
 ### 프롬프트 형식이 고정된 모델
 
